@@ -151,13 +151,22 @@ npm install
 
 3. Set environment variables
 ```bash
-export TELEGRAM_BOT_TOKEN="your_bot_token_here"
-export ADMIN_IDS="123456789"  # Your Telegram user ID
+export TELEGRAM_BOT_TOKEN=xxx
+export DATABASE_URL=postgres://user:pass@localhost:5432/tempmail
+export ADMIN_IDS=your_telegram_id
+export DB_POOL_SIZE=50
+export CONCURRENT_CHECKS=20
 ```
 
 4. Start the bot
 ```bash
 npm start
+```
+
+5. Update
+```bash
+git fetch origin
+git reset --hard origin/main
 ```
 
 ---
