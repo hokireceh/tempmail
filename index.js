@@ -1,4 +1,6 @@
 // File: index.js
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
@@ -99,7 +101,13 @@ const circuitBreaker = {
 
 // =================== BOT INITIALIZATION ===================
 const bot = new TelegramBot(TELEGRAM_TOKEN, { 
-    polling: true  // Enable polling for easier setup
+    polling: {
+        interval: 2000,
+        autoStart: true,
+        params: {
+            timeout: 10
+        }
+    }
 });
 
 console.log('🤖 Bot Telegram TempMail sedang diinisialisasi...');
