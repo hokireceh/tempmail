@@ -416,7 +416,7 @@ async function getEmailBody(accessToken, emailUuid, emailId) {
                     .replace(/&#39;/g, "'")
                     .replace(/&#x27;/g, "'")
                     .replace(/&apos;/g, "'")
-                    .replace(/&#(\d+);/g, '')
+                    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
                     .replace(/&amp;/g, '&');
 
                 body = body.replace(/<a[^>]+href="([^"]+)"[^>]*>(.*?)<\/a>/gis, (match, url, text) => {
@@ -1028,8 +1028,8 @@ async function handleBroadcastConfirm(chatId, userId) {
 
     await bot.sendMessage(chatId, '⏳ Sedang mengirim broadcast...');
 
-    const broadcaster = new SmartBroadcaster(bot, BROADCAST_RATE_LIMIT);
-    const result = await broadcaster.broadcast(users, state.type || 'text', message, state.mediaInfo || null, entities);
+    const broadcaster = new SmartBroadcaster(bot, dbClient);
+    const result = await broadcaster.broadcast(users, message, state.mediaInfo || null, message, entities);
 
     try {
         const broadcastType = state.type === 'media' ? 'media' : 'text';
@@ -1134,6 +1134,9 @@ bot.onText(/\/broadcast\s+(.+)/i, async (msg, match) => {
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    const text = msg.text;
+
+    trackUser(userId, msg.from.username);
 
     const state = broadcastState.get(chatId);
     if (state && state.status === 'waiting_for_message' && isAdmin(userId)) {
@@ -1177,7 +1180,10 @@ bot.on('message', async (msg) => {
         }
     }
 
-    if (!isAdmin(userId)) return;
+    if (!isAdmin(userId)) {
+        if (text && !text.startsWith('/')) showMainMenu(chatId);
+        return;
+    }
 
     let mediaInfo = null;
     let mediaCaption = msg.caption || null;
@@ -1251,99 +1257,8 @@ bot.on('message', async (msg) => {
                 }
             }
         );
+        return;
     }
-});
-
-bot.on('callback_query', async (callbackQuery) => {
-    if (callbackQuery.data === 'broadcast_confirm') {
-        const chatId = callbackQuery.message.chat.id;
-        const state = broadcastState.get(chatId);
-
-        if (!state) {
-            return bot.answerCallbackQuery(callbackQuery.id, { text: 'Broadcast state tidak ditemukan', show_alert: true });
-        }
-
-        await bot.answerCallbackQuery(callbackQuery.id);
-        await bot.editMessageText('🔄 Mempersiapkan broadcast...', {
-            chat_id: chatId,
-            message_id: callbackQuery.message.message_id,
-            reply_markup: { inline_keyboard: [] }
-        });
-
-        const userArray = await getAllUsers();
-
-        if (userArray.length === 0) {
-            return bot.editMessageText('❌ Tidak ada user untuk broadcast.', {
-                chat_id: chatId,
-                message_id: callbackQuery.message.message_id
-            });
-        }
-
-        const broadcaster = new SmartBroadcaster(bot, dbClient);
-        broadcaster.broadcast(userArray, state.message, state.mediaInfo || null, state.message);
-
-        let lastProgress = 0;
-        const progressInterval = setInterval(async () => {
-            try {
-                const progress = broadcaster.getProgress();
-
-                const percent = progress.progressPercent;
-                if (percent !== lastProgress && percent % 10 === 0) {
-                    lastProgress = percent;
-
-                    const statusText = 
-                        `🚀 *BROADCAST BERJALAN*\n\n` +
-                        `📊 Progress: ${progress.progressPercent}% (${progress.processed}/${progress.total})\n` +
-                        `✅ Berhasil: ${progress.success}\n` +
-                        `❌ Gagal: ${progress.failed}\n` +
-                        `🚫 Blocked: ${progress.blocked}\n` +
-                        `⏱️ Waktu: ${progress.elapsedTime}s`;
-
-                    await safeEditMessage(chatId, callbackQuery.message.message_id, statusText, {
-                        parse_mode: 'Markdown'
-                    });
-                }
-
-                if (!progress.isProcessing && progress.remaining === 0) {
-                    clearInterval(progressInterval);
-
-                    const finalStatus = 
-                        `✅ *BROADCAST SELESAI*\n\n` +
-                        `📊 *Hasil:*\n` +
-                        `✅ Berhasil: ${progress.success}\n` +
-                        `❌ Gagal: ${progress.failed}\n` +
-                        `🚫 Blocked: ${progress.blocked}\n` +
-                        `⏱️ Total waktu: ${progress.elapsedTime}s\n\n` +
-                        `📈 *Success Rate:* ${Math.round((progress.success / progress.total) * 100)}%`;
-
-                    await safeEditMessage(chatId, callbackQuery.message.message_id, finalStatus, {
-                        parse_mode: 'Markdown'
-                    });
-
-                    broadcastState.delete(chatId);
-                }
-            } catch (error) {
-                console.error('Progress update error:', error.message);
-            }
-        }, 2000);
-
-    } else if (callbackQuery.data === 'broadcast_cancel') {
-        await bot.answerCallbackQuery(callbackQuery.id);
-        await bot.editMessageText('❌ Broadcast dibatalkan.', {
-            chat_id: callbackQuery.message.chat.id,
-            message_id: callbackQuery.message.message_id,
-            reply_markup: { inline_keyboard: [] }
-        });
-        broadcastState.delete(callbackQuery.message.chat.id);
-    }
-});
-
-// =================== PESAN BIASA ===================
-bot.on('message', (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-
-    trackUser(msg.from.id, msg.from.username);
 
     if (text && !text.startsWith('/')) {
         showMainMenu(chatId);
@@ -1432,13 +1347,13 @@ async function getActiveEmails() {
                ue.created_at, ue.last_activity
         FROM user_emails ue
         WHERE ue.is_active = true 
-          AND ue.last_activity > NOW() - INTERVAL '${ACTIVE_USER_HOURS} hours'
+          AND ue.last_activity > NOW() - ($1 * INTERVAL '1 hour')
         ORDER BY ue.last_activity DESC
         LIMIT 50000
     `;
     
     try {
-        const result = await dbClient.query(query);
+        const result = await dbClient.query(query, [ACTIVE_USER_HOURS]);
         return result.rows;
     } catch (error) {
         console.log('⚠️ Fallback to legacy query');
@@ -1525,4 +1440,5 @@ setTimeout(() => {
 console.log('✅ Bot berhasil dijalankan!');
 console.log(`⏱️ Auto-check interval: ${CHECK_INTERVAL / 1000} detik`);
 console.log('📧 API TMailor: ' + TMAILOR_API);
+testBotAuth();
 console.log('\n🔥 Bot siap digunakan! Ketik /start di Telegram');

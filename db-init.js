@@ -1,5 +1,4 @@
 // Database initialization script - creates tables if they don't exist
-const { Client } = require('pg');
 
 async function initializeDatabase(dbClient) {
     try {
