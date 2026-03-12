@@ -1,35 +1,54 @@
 // saweria.js - Modul integrasi Saweria QRIS untuk bot TempMail
-const axios = require('axios');
-const https = require('https');
-const QRCode = require('qrcode');
-const path = require('path');
-const fs = require('fs');
+const cloudscraper = require('cloudscraper');
+const https        = require('https');
+const QRCode       = require('qrcode');
+const path         = require('path');
+const fs           = require('fs');
 
 const SAWERIA_USERNAME = process.env.SAWERIA_USERNAME;
 const SAWERIA_USER_ID  = process.env.SAWERIA_USER_ID;
 const SAWERIA_API      = 'https://backend.saweria.co';
 const SAWERIA_HEADERS  = {
     'Content-Type': 'application/json',
+    'Accept': 'application/json, text/plain, */*',
     'Origin': 'https://saweria.co',
+    'Referer': 'https://saweria.co/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 };
 
-const keepAliveAgent = new https.Agent({
-    keepAlive: true,
-    keepAliveMsecs: 10000,
-    maxSockets: 10,
-    timeout: 30000,
-});
+function isCloudflareBlock(data) {
+    if (typeof data !== 'string') return false;
+    return data.includes('Cloudflare') && (
+        data.includes('Sorry, you have been blocked') ||
+        data.includes('Attention Required') ||
+        data.includes('cf-error-details')
+    );
+}
 
-const axiosInstance = axios.create({
-    timeout: 30000,
-    httpsAgent: keepAliveAgent,
-});
+function parseResponse(raw) {
+    if (typeof raw === 'string') {
+        if (isCloudflareBlock(raw)) {
+            throw new Error('CLOUDFLARE_BLOCK');
+        }
+        try {
+            return JSON.parse(raw);
+        } catch (_) {
+            throw new Error('Invalid JSON response from Saweria');
+        }
+    }
+    const str = JSON.stringify(raw);
+    if (isCloudflareBlock(str)) {
+        throw new Error('CLOUDFLARE_BLOCK');
+    }
+    return raw;
+}
 
 async function withRetry(fn, retries = 3, delayMs = 2000) {
     for (let i = 0; i < retries; i++) {
         try {
             return await fn();
         } catch (err) {
+            if (err.message === 'CLOUDFLARE_BLOCK') throw err;
             if (i === retries - 1) throw err;
             const wait = delayMs * Math.pow(2, i);
             console.log(`⚠️ [Saweria] Retry ${i + 1}/${retries} setelah ${wait}ms... (${err.message})`);
@@ -49,10 +68,14 @@ async function getSaweriaBuildId() {
     }
     _buildIdFetching = true;
     try {
-        const res = await axiosInstance.get(`https://saweria.co/${SAWERIA_USERNAME}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+        const raw = await cloudscraper.get(`https://saweria.co/${SAWERIA_USERNAME}`, {
+            headers: SAWERIA_HEADERS,
         });
-        const match = res.data.match(/"buildId"\s*:\s*"([^"]+)"/);
+        if (isCloudflareBlock(raw)) {
+            console.warn('[Saweria] Build ID endpoint diblokir Cloudflare');
+            return null;
+        }
+        const match = raw.match(/"buildId"\s*:\s*"([^"]+)"/);
         if (match) {
             _buildId = match[1];
             console.log('✅ [Saweria] Build ID:', _buildId);
@@ -93,9 +116,8 @@ function buildDonationPayload(amount, email, name, message) {
 
 async function checkEligible(amount) {
     return withRetry(async () => {
-        const res = await axiosInstance.post(
-            `${SAWERIA_API}/reward/check-eligible/${SAWERIA_USERNAME}`,
-            {
+        const raw = await cloudscraper.post(`${SAWERIA_API}/reward/check-eligible/${SAWERIA_USERNAME}`, {
+            json: {
                 agree: false, notUnderage: false,
                 amount, payment_type: '', currency: 'IDR',
                 message: '', vote: '', giphy: null,
@@ -104,20 +126,22 @@ async function checkEligible(amount) {
                 amountToPay: '', pgFee: '', platformFee: '',
                 customer_info: { first_name: '', email: '', phone: '' },
             },
-            { headers: SAWERIA_HEADERS }
-        );
-        return res.data;
+            headers: SAWERIA_HEADERS,
+        });
+        return parseResponse(raw);
     });
 }
 
 async function calculateAmount(amount, email, name, message) {
     return withRetry(async () => {
-        const res = await axiosInstance.post(
+        const raw = await cloudscraper.post(
             `${SAWERIA_API}/donations/${SAWERIA_USERNAME}/calculate_pg_amount`,
-            buildDonationPayload(amount, email, name, message),
-            { headers: SAWERIA_HEADERS }
+            {
+                json: buildDonationPayload(amount, email, name, message),
+                headers: SAWERIA_HEADERS,
+            }
         );
-        return res.data;
+        return parseResponse(raw);
     });
 }
 
@@ -129,12 +153,14 @@ async function createDonation(amount, email, name, message, amountToPay, pgFee, 
             pgFee: String(pgFee),
             platformFee: String(platformFee ?? 0),
         };
-        const res = await axiosInstance.post(
+        const raw = await cloudscraper.post(
             `${SAWERIA_API}/donations/snap/${SAWERIA_USER_ID}`,
-            payload,
-            { headers: SAWERIA_HEADERS }
+            {
+                json: payload,
+                headers: SAWERIA_HEADERS,
+            }
         );
-        return res.data;
+        return parseResponse(raw);
     });
 }
 
@@ -142,35 +168,42 @@ async function checkPaymentStatus(donationId) {
     try {
         const buildId = await getSaweriaBuildId();
         if (buildId) {
-            const res = await axiosInstance.get(
+            const raw = await cloudscraper.get(
                 `https://saweria.co/_next/data/${buildId}/id/qris/snap/${donationId}.json`,
-                { headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://saweria.co/' } }
+                { headers: { ...SAWERIA_HEADERS } }
             );
-            const d = res.data?.pageProps?.data;
-            if (d) {
-                return {
-                    id: d.id,
-                    status: (d.transaction_status || '').toUpperCase(),
-                    amount: d.amount_raw,
-                };
+            if (!isCloudflareBlock(raw)) {
+                const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                const d = data?.pageProps?.data;
+                if (d) {
+                    return {
+                        id: d.id,
+                        status: (d.transaction_status || '').toUpperCase(),
+                        amount: d.amount_raw,
+                    };
+                }
             }
         }
     } catch (e) {
-        if (e.response?.status === 404) {
+        if (e.statusCode === 404 || e.response?.status === 404) {
             _buildId = null;
         }
     }
+
     try {
-        const res = await axiosInstance.get(`${SAWERIA_API}/donations/${donationId}`, {
+        const raw = await cloudscraper.get(`${SAWERIA_API}/donations/${donationId}`, {
             headers: SAWERIA_HEADERS,
         });
-        const d = res.data?.data;
-        if (d) {
-            return {
-                id: d.id,
-                status: (d.status || '').toUpperCase(),
-                amount: d.amount,
-            };
+        if (!isCloudflareBlock(raw)) {
+            const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            const d = data?.data;
+            if (d) {
+                return {
+                    id: d.id,
+                    status: (d.status || '').toUpperCase(),
+                    amount: d.amount,
+                };
+            }
         }
     } catch (e) {
         return null;
